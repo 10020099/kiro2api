@@ -27,6 +27,21 @@ type CodeWhispererRequest struct {
 		ConversationId string `json:"conversationId"`
 		History        []any  `json:"history"`
 	} `json:"conversationState"`
+	InferenceConfiguration *InferenceConfiguration `json:"inferenceConfiguration,omitempty"` // 推理配置（包含 thinking）
+}
+
+// InferenceConfiguration 表示推理配置
+type InferenceConfiguration struct {
+	MaxTokens   int                      `json:"maxTokens,omitempty"`
+	Temperature *float64                 `json:"temperature,omitempty"`
+	TopP        *float64                 `json:"topP,omitempty"`
+	Thinking    *CodeWhispererThinking   `json:"thinking,omitempty"` // 深度思考配置
+}
+
+// CodeWhispererThinking 表示 CodeWhisperer 的深度思考配置
+type CodeWhispererThinking struct {
+	Type         string `json:"type"`          // "enabled" 或 "disabled"
+	BudgetTokens int    `json:"budget_tokens"` // 思考预算 token 数
 }
 
 // CodeWhispererImage 表示 CodeWhisperer API 的图片结构

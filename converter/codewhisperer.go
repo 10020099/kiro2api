@@ -517,6 +517,49 @@ func BuildCodeWhispererRequest(anthropicReq types.AnthropicRequest, ctx *gin.Con
 		cwReq.ConversationState.History = history
 	}
 
+	// 处理 thinking 配置 (Claude 深度思考模式)
+	if anthropicReq.Thinking != nil && anthropicReq.Thinking.Type == "enabled" {
+		// 验证模型兼容性
+		if !isThinkingCompatibleModel(anthropicReq.Model) {
+			return cwReq, fmt.Errorf("模型 %s 不支持 thinking 模式，仅支持 Claude 3.7 Sonnet 及后续版本", anthropicReq.Model)
+		}
+
+		// 智能调整 max_tokens：确保 max_tokens > budget_tokens
+		// 如果 max_tokens 不足，自动调整为 budget_tokens + 4096（留出足够的输出空间）
+		effectiveMaxTokens := anthropicReq.MaxTokens
+		if effectiveMaxTokens <= anthropicReq.Thinking.BudgetTokens {
+			effectiveMaxTokens = anthropicReq.Thinking.BudgetTokens + 4096
+			logger.Warn("自动调整 max_tokens 以满足 thinking 模式要求",
+				logger.Int("original_max_tokens", anthropicReq.MaxTokens),
+				logger.Int("budget_tokens", anthropicReq.Thinking.BudgetTokens),
+				logger.Int("adjusted_max_tokens", effectiveMaxTokens))
+		}
+
+		// 验证 tool_choice 兼容性
+		if err := validateToolChoiceForThinking(anthropicReq); err != nil {
+			return cwReq, err
+		}
+
+		// 设置 inferenceConfiguration
+		cwReq.InferenceConfiguration = &types.InferenceConfiguration{
+			MaxTokens: effectiveMaxTokens,
+			Thinking: &types.CodeWhispererThinking{
+				Type:         "enabled",
+				BudgetTokens: anthropicReq.Thinking.BudgetTokens,
+			},
+		}
+
+		// 如果有 temperature，也添加到配置中
+		if anthropicReq.Temperature != nil {
+			cwReq.InferenceConfiguration.Temperature = anthropicReq.Temperature
+		}
+
+		logger.Debug("已启用 thinking 模式",
+			logger.String("model", anthropicReq.Model),
+			logger.Int("budget_tokens", anthropicReq.Thinking.BudgetTokens),
+			logger.Int("max_tokens", effectiveMaxTokens))
+	}
+
 	// 最终验证请求完整性 (KISS: 简化验证逻辑)
 	if err := validateCodeWhispererRequest(&cwReq); err != nil {
 		return cwReq, fmt.Errorf("请求验证失败: %v", err)
@@ -607,4 +650,71 @@ func extractToolUsesFromMessage(content any) []types.ToolUseEntry {
 	}
 
 	return toolUses
+}
+
+// isThinkingCompatibleModel 检查模型是否支持 thinking 模式
+// 仅 Claude 3.7 Sonnet 及后续版本支持深度思考功能
+func isThinkingCompatibleModel(model string) bool {
+	compatibleModels := []string{
+		// 常用别名（Claude Code/用户侧经常使用无日期后缀）
+		"claude-3-7-sonnet",
+		"claude-sonnet-4",
+		"claude-sonnet-4-5",
+		"claude-opus-4-5",
+
+		"claude-3-7-sonnet-20250219",
+		"claude-sonnet-4-20250514",
+		"claude-sonnet-4-5-20250929",
+		"claude-opus-4-5-20251101",
+	}
+	for _, m := range compatibleModels {
+		if model == m {
+			return true
+		}
+	}
+	return false
+}
+
+// validateToolChoiceForThinking 验证 thinking 模式下的 tool_choice 兼容性
+// 启用 thinking 时，tool_choice 只能为 auto 或 none
+func validateToolChoiceForThinking(req types.AnthropicRequest) error {
+	if req.ToolChoice == nil {
+		return nil // 默认为 auto，兼容
+	}
+
+	// 检查 tool_choice 类型 - 处理 *types.ToolChoice 指针类型
+	if tc, ok := req.ToolChoice.(*types.ToolChoice); ok && tc != nil {
+		if tc.Type != "auto" && tc.Type != "none" && tc.Type != "" {
+			return fmt.Errorf("thinking 模式下 tool_choice 只能为 auto 或 none，当前为: %s", tc.Type)
+		}
+		return nil
+	}
+
+	// 检查 tool_choice 类型 - 处理 types.ToolChoice 值类型
+	if tc, ok := req.ToolChoice.(types.ToolChoice); ok {
+		if tc.Type != "auto" && tc.Type != "none" && tc.Type != "" {
+			return fmt.Errorf("thinking 模式下 tool_choice 只能为 auto 或 none，当前为: %s", tc.Type)
+		}
+		return nil
+	}
+
+	// 检查 tool_choice 类型 - 处理 map[string]any 类型
+	if tcMap, ok := req.ToolChoice.(map[string]any); ok {
+		if tcType, exists := tcMap["type"].(string); exists {
+			if tcType != "auto" && tcType != "none" && tcType != "" {
+				return fmt.Errorf("thinking 模式下 tool_choice 只能为 auto 或 none，当前为: %s", tcType)
+			}
+		}
+		return nil
+	}
+
+	// 检查 tool_choice 类型 - 处理字符串类型 (如 "auto", "none")
+	if tcStr, ok := req.ToolChoice.(string); ok {
+		if tcStr != "auto" && tcStr != "none" && tcStr != "" {
+			return fmt.Errorf("thinking 模式下 tool_choice 只能为 auto 或 none，当前为: %s", tcStr)
+		}
+		return nil
+	}
+
+	return nil
 }

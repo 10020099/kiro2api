@@ -50,10 +50,19 @@ func handleCountTokens(c *gin.Context) {
 	}
 
 	// 创建token估算器
-	estimator := utils.NewTokenEstimator()
+	counter := utils.NewTokenCounterFromEnv()
 
-	// 计算token数量
-	tokenCount := estimator.EstimateTokens(&req)
+	// 计算token数量（优先官方API，失败则本地估算）
+	tokenCount, err := counter.CountInputTokens(c.Request.Context(), &req)
+	if err != nil {
+		logger.Warn("token计数失败，回退到本地估算",
+			addReqFields(c,
+				logger.Err(err),
+			)...)
+		// 理论上 CountInputTokens 已做本地回退，这里再兜底一次
+		estimator := utils.NewTokenEstimator()
+		tokenCount = estimator.EstimateTokens(&req)
+	}
 
 	// 返回符合官方API格式的响应
 	c.JSON(http.StatusOK, types.CountTokensResponse{

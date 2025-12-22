@@ -36,6 +36,7 @@ type StreamProcessorContext struct {
 
 	// 统计信息
 	totalOutputChars     int
+	totalOutputTokens    int
 	totalReadBytes       int
 	totalProcessedEvents int
 	lastParseErr         error
@@ -223,17 +224,21 @@ func (ctx *StreamProcessorContext) sendFinalEvents() error {
 
 	ctx.stopReasonManager.UpdateToolCallStatus(hasActiveTools, hasCompletedTools)
 
-	// 计算输出tokens（基于totalOutputChars直接估算）
-	// 移除rawDataBuffer后，直接使用已统计的字符数进行估算
-	baseTokens := ctx.totalOutputChars / config.TokenEstimationRatio
-
-	// 如果包含工具调用，增加结构化开销
-	outputTokens := baseTokens
-	if len(ctx.toolUseIdByBlockIndex) > 0 {
-		outputTokens = int(float64(baseTokens) * config.ToolCallTokenOverhead)
-	}
-	if outputTokens < config.MinOutputTokens && ctx.totalOutputChars > 0 {
-		outputTokens = config.MinOutputTokens
+	// 计算输出tokens：
+	// 1) 优先使用上游 message_delta.usage.output_tokens（如果有）
+	// 2) 否则基于流式 delta 累计的 totalOutputTokens
+	// 3) 最后才回退到历史的“按输出负载字节数估算”
+	outputTokens := ctx.totalOutputTokens
+	if outputTokens <= 0 {
+		baseTokens := ctx.totalOutputChars / config.TokenEstimationRatio
+		outputTokens = baseTokens
+		// 仅在回退路径下，对工具调用增加结构化开销（避免与delta累计重复计数）
+		if len(ctx.toolUseIdByBlockIndex) > 0 || len(ctx.completedToolUseIds) > 0 {
+			outputTokens = int(float64(baseTokens) * config.ToolCallTokenOverhead)
+		}
+		if outputTokens < config.MinOutputTokens && ctx.totalOutputChars > 0 {
+			outputTokens = config.MinOutputTokens
+		}
 	}
 
 	// 确定stop_reason
@@ -266,6 +271,21 @@ func extractIndex(dataMap map[string]any) int {
 		return int(f)
 	}
 	return -1
+}
+
+func extractIntAny(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	default:
+		return 0, false
+	}
 }
 
 // getStringField 从映射中安全提取字符串字段
@@ -366,6 +386,14 @@ func (esp *EventStreamProcessor) processEvent(event parser.SSEEvent) error {
 		esp.ctx.processToolUseStop(dataMap)
 
 	case "message_delta":
+		// 如果上游携带了usage.output_tokens，优先记录下来作为最终输出
+		if usage, ok := dataMap["usage"].(map[string]any); ok {
+			if v, exists := usage["output_tokens"]; exists {
+				if out, ok2 := extractIntAny(v); ok2 && out > 0 {
+					esp.ctx.totalOutputTokens = out
+				}
+			}
+		}
 
 	case "exception":
 		// 处理上游异常事件，检查是否需要映射为max_tokens
@@ -387,6 +415,28 @@ func (esp *EventStreamProcessor) processEvent(event parser.SSEEvent) error {
 	} else {
 		// 序列化失败时保底：不影响主流程，仅跳过统计
 		logger.Debug("数据序列化用于统计失败，跳过该事件", logger.Err(err))
+	}
+
+	// 更新输出 token 统计（仅在上游未直接给出 output_tokens 时有意义）
+	// 关注：text_delta / thinking_delta / input_json_delta
+	if eventType == "content_block_delta" {
+		if delta, ok := dataMap["delta"].(map[string]any); ok {
+			dt, _ := delta["type"].(string)
+			switch dt {
+			case "text_delta":
+				if text, ok := delta["text"].(string); ok && text != "" {
+					esp.ctx.totalOutputTokens += utils.CountTokensWithTiktoken(text, "cl100k_base")
+				}
+			case "thinking_delta":
+				if thinking, ok := delta["thinking"].(string); ok && thinking != "" {
+					esp.ctx.totalOutputTokens += utils.CountTokensWithTiktoken(thinking, "cl100k_base")
+				}
+			case "input_json_delta":
+				if pj, ok := delta["partial_json"].(string); ok && pj != "" {
+					esp.ctx.totalOutputTokens += utils.CountTokensWithTiktoken(pj, "cl100k_base")
+				}
+			}
+		}
 	}
 
 	esp.ctx.c.Writer.Flush()
@@ -432,8 +482,14 @@ func (esp *EventStreamProcessor) handleExceptionEvent(dataMap map[string]any) bo
 				"stop_sequence": nil,
 			},
 			"usage": map[string]any{
-				"input_tokens":  esp.ctx.inputTokens,
-				"output_tokens": esp.ctx.totalOutputChars / config.TokenEstimationRatio, // 简单估算
+				"input_tokens": esp.ctx.inputTokens,
+				"output_tokens": func() int {
+					if esp.ctx.totalOutputTokens > 0 {
+						return esp.ctx.totalOutputTokens
+					}
+					// 回退路径
+					return esp.ctx.totalOutputChars / config.TokenEstimationRatio
+				}(),
 			},
 		}
 

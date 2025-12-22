@@ -85,6 +85,13 @@ func (cmp *CompliantMessageProcessor) registerEventHandlers() {
 		toolManager: cmp.toolManager,
 		aggregator:  cmp.toolDataAggregator,
 	}
+
+	// 静默忽略的事件（计量和上下文使用）
+	cmp.eventHandlers[EventTypes.METERING_EVENT] = &NoOpEventHandler{}
+	cmp.eventHandlers[EventTypes.CONTEXT_USAGE_EVENT] = &NoOpEventHandler{}
+
+	// Claude Extended Thinking 事件处理器
+	cmp.eventHandlers[EventTypes.THINKING_EVENT] = &ThinkingEventHandler{}
 }
 
 // ProcessMessage 处理单个消息

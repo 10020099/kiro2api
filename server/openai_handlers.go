@@ -63,7 +63,28 @@ func handleOpenAINonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRe
 	}
 
 	// 构建Anthropic响应
-	inputContent, _ := utils.GetMessageContent(anthropicReq.Messages[0].Content)
+	// 计算更准确的 tokens（优先官方count_tokens，失败则本地估算）
+	countReq := &types.CountTokensRequest{
+		Model:    anthropicReq.Model,
+		System:   anthropicReq.System,
+		Messages: anthropicReq.Messages,
+		Tools:    anthropicReq.Tools,
+	}
+	counter := utils.NewTokenCounterFromEnv()
+	inputTokens, err := counter.CountInputTokens(c.Request.Context(), countReq)
+	if err != nil {
+		logger.Warn("计算输入tokens失败，回退到本地估算", addReqFields(c, logger.Err(err))...)
+		estimator := utils.NewTokenEstimator()
+		inputTokens = estimator.EstimateTokens(countReq)
+	}
+
+	outputTokens := utils.CountTokensWithTiktoken(allContent, "cl100k_base")
+	for _, tool := range result.GetToolCalls() {
+		outputTokens += utils.CountTokensWithTiktoken(tool.Name, "cl100k_base")
+		if b, mErr := utils.SafeMarshal(tool.Arguments); mErr == nil {
+			outputTokens += utils.CountTokensWithTiktoken(string(b), "cl100k_base")
+		}
+	}
 	stopReason := func() string {
 		if sawToolUse {
 			return "tool_use"
@@ -78,8 +99,8 @@ func handleOpenAINonStreamRequest(c *gin.Context, anthropicReq types.AnthropicRe
 		"stop_sequence": nil,
 		"type":          "message",
 		"usage": map[string]any{
-			"input_tokens":  len(inputContent),
-			"output_tokens": len(allContent),
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
 		},
 	}
 
@@ -145,6 +166,7 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 	nextToolIndex := 0
 	sawToolUse := false
 	sentFinal := false
+	inThinking := false
 
 	// 添加完整性跟踪
 	totalBytesRead := 0
@@ -176,6 +198,26 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 								if deltaMap, ok := delta.(map[string]any); ok {
 									switch deltaMap["type"] {
 									case "text_delta":
+										// 如果前面出现过 thinking_delta，用标签闭合，避免和正文混在一起
+										if inThinking {
+											closeEvent := map[string]any{
+												"id":      messageId,
+												"object":  "chat.completion.chunk",
+												"created": time.Now().Unix(),
+												"model":   anthropicReq.Model,
+												"choices": []map[string]any{
+													{
+														"index": 0,
+														"delta": map[string]any{
+															"content": "\n</thinking>\n\n",
+														},
+														"finish_reason": nil,
+													},
+												},
+											}
+											sender.SendEvent(c, closeEvent)
+											inThinking = false
+										}
 										if text, ok := deltaMap["text"]; ok {
 											// 发送文本内容的增量
 											contentEvent := map[string]any{
@@ -194,6 +236,56 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 												},
 											}
 											sender.SendEvent(c, contentEvent)
+										}
+									case "thinking_delta":
+										// OpenAI 协议没有 thinking 字段，这里用 <thinking> 标签透出，便于终端/客户端观察。
+										var thinking string
+										if v, ok := deltaMap["thinking"]; ok {
+											switch s := v.(type) {
+											case string:
+												thinking = s
+											case *string:
+												if s != nil {
+													thinking = *s
+												}
+											}
+										}
+										if thinking != "" {
+											if !inThinking {
+												openEvent := map[string]any{
+													"id":      messageId,
+													"object":  "chat.completion.chunk",
+													"created": time.Now().Unix(),
+													"model":   anthropicReq.Model,
+													"choices": []map[string]any{
+														{
+															"index": 0,
+															"delta": map[string]any{
+																"content": "<thinking>\n",
+															},
+															"finish_reason": nil,
+														},
+													},
+												}
+												sender.SendEvent(c, openEvent)
+												inThinking = true
+											}
+											thinkingEvent := map[string]any{
+												"id":      messageId,
+												"object":  "chat.completion.chunk",
+												"created": time.Now().Unix(),
+												"model":   anthropicReq.Model,
+												"choices": []map[string]any{
+													{
+														"index": 0,
+														"delta": map[string]any{
+															"content": thinking,
+														},
+														"finish_reason": nil,
+													},
+												},
+											}
+											sender.SendEvent(c, thinkingEvent)
 										}
 									case "input_json_delta":
 										// 工具调用参数增量
@@ -381,6 +473,26 @@ func handleOpenAIStreamRequest(c *gin.Context, anthropicReq types.AnthropicReque
 
 	// 确保发送了结束原因（如果还没有发送）
 	if !sentFinal && messageCount > 0 {
+		if inThinking {
+			closeEvent := map[string]any{
+				"id":      messageId,
+				"object":  "chat.completion.chunk",
+				"created": time.Now().Unix(),
+				"model":   anthropicReq.Model,
+				"choices": []map[string]any{
+					{
+						"index": 0,
+						"delta": map[string]any{
+							"content": "\n</thinking>\n\n",
+						},
+						"finish_reason": nil,
+					},
+				},
+			}
+			sender.SendEvent(c, closeEvent)
+			inThinking = false
+		}
+
 		finishReason := "stop"
 		if sawToolUse {
 			finishReason = "tool_calls"

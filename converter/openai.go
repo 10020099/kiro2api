@@ -152,11 +152,25 @@ func ConvertAnthropicToOpenAI(anthropicResp map[string]any, model string, messag
 	promptTokens := 0
 	completionTokens := len(content) / 4 // 简单估算
 	if usage, ok := anthropicResp["usage"].(map[string]any); ok {
-		if inputTokens, ok := usage["input_tokens"].(int); ok {
-			promptTokens = inputTokens
+		if v, ok := usage["input_tokens"]; ok {
+			switch n := v.(type) {
+			case int:
+				promptTokens = n
+			case int64:
+				promptTokens = int(n)
+			case float64:
+				promptTokens = int(n)
+			}
 		}
-		if outputTokens, ok := usage["output_tokens"].(int); ok {
-			completionTokens = outputTokens
+		if v, ok := usage["output_tokens"]; ok {
+			switch n := v.(type) {
+			case int:
+				completionTokens = n
+			case int64:
+				completionTokens = int(n)
+			case float64:
+				completionTokens = int(n)
+			}
 		}
 	}
 

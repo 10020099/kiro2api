@@ -100,6 +100,13 @@ var EventTypes = struct {
 	// 兼容旧格式
 	ASSISTANT_RESPONSE_EVENT string
 	TOOL_USE_EVENT           string
+
+	// 计量和上下文事件（静默忽略）
+	METERING_EVENT      string
+	CONTEXT_USAGE_EVENT string
+
+	// Claude Extended Thinking
+	THINKING_EVENT string
 }{
 	COMPLETION:       "completion",
 	COMPLETION_CHUNK: "completion_chunk",
@@ -115,6 +122,11 @@ var EventTypes = struct {
 
 	ASSISTANT_RESPONSE_EVENT: "assistantResponseEvent",
 	TOOL_USE_EVENT:           "toolUseEvent",
+
+	METERING_EVENT:      "meteringEvent",
+	CONTEXT_USAGE_EVENT: "contextUsageEvent",
+
+	THINKING_EVENT: "thinkingEvent",
 }
 
 // ToolExecution 工具执行状态
@@ -287,6 +299,12 @@ type toolUseEvent struct {
 	ToolUseId string `json:"toolUseId"`
 	Input     any    `json:"input"` // 修复：支持对象和字符串格式
 	Stop      bool   `json:"stop"`
+}
+
+// thinkingEvent 思考事件（Claude Extended Thinking）
+type thinkingEvent struct {
+	Type    string `json:"type"`    // "thinking"
+	Content string `json:"content"` // 思考内容
 }
 
 // parseFullAssistantResponseEvent 解析完整的助手响应事件

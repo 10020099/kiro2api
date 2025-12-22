@@ -63,15 +63,23 @@ func handleStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest, to
 
 // handleGenericStreamRequest 通用流式请求处理
 func handleGenericStreamRequest(c *gin.Context, anthropicReq types.AnthropicRequest, token *types.TokenWithUsage, sender StreamEventSender, eventCreator func(string, int, string) []map[string]any) {
-	// 计算输入tokens
-	estimator := utils.NewTokenEstimator()
+	// 计算输入tokens（优先官方count_tokens，失败则本地估算）
 	countReq := &types.CountTokensRequest{
 		Model:    anthropicReq.Model,
 		System:   anthropicReq.System,
 		Messages: anthropicReq.Messages,
 		Tools:    anthropicReq.Tools,
 	}
-	inputTokens := estimator.EstimateTokens(countReq)
+	counter := utils.NewTokenCounterFromEnv()
+	inputTokens, err := counter.CountInputTokens(c.Request.Context(), countReq)
+	if err != nil {
+		logger.Warn("计算输入tokens失败，回退到本地估算",
+			addReqFields(c,
+				logger.Err(err),
+			)...)
+		estimator := utils.NewTokenEstimator()
+		inputTokens = estimator.EstimateTokens(countReq)
+	}
 
 	// 初始化SSE响应
 	if err := initializeSSEResponse(c); err != nil {

@@ -37,6 +37,13 @@ func isToolCallEvent(payload []byte) bool {
 		strings.Contains(payloadStr, "\"name\":") && strings.Contains(payloadStr, "\"input\":")
 }
 
+// isThinkingEvent 检查是否为 thinking 事件（Claude Extended Thinking）
+func isThinkingEvent(payload []byte) bool {
+	payloadStr := string(payload)
+	return strings.Contains(payloadStr, "\"type\":\"thinking\"") ||
+		strings.Contains(payloadStr, "\"type\": \"thinking\"")
+}
+
 // isStreamingResponse 检查是否为流式响应
 func isStreamingResponse(event *FullAssistantResponseEvent) bool {
 	// 检查是否包含部分内容或状态为进行中
@@ -308,6 +315,12 @@ func (h *StandardAssistantResponseEventHandler) Handle(message *EventStreamMessa
 		return h.handleToolCallEvent(message)
 	}
 
+	// 检查是否是 thinking 事件（Claude Extended Thinking）
+	if isThinkingEvent(message.Payload) {
+		logger.Debug("检测到 thinking 事件，使用 thinking 处理器")
+		return h.handleLegacyFormat(message.Payload) // thinking 事件通过 legacy 格式处理
+	}
+
 	// 作为标准事件，优先尝试解析完整格式
 	if fullEvent, err := parseFullAssistantResponseEvent(message.Payload); err == nil {
 		// 对于流式响应，放宽验证要求
@@ -439,6 +452,11 @@ func (h *StandardAssistantResponseEventHandler) handleLegacyFormat(payload []byt
 		return []SSEEvent{}, nil
 	}
 
+	// 检查是否是 thinking 内容块
+	if contentType, ok := data["type"].(string); ok && contentType == "thinking" {
+		return h.handleThinkingContent(data)
+	}
+
 	// 基本处理
 	var events []SSEEvent
 	if content, ok := data["content"].(string); ok && content != "" {
@@ -456,6 +474,52 @@ func (h *StandardAssistantResponseEventHandler) handleLegacyFormat(payload []byt
 	}
 
 	return events, nil
+}
+
+// handleThinkingContent 处理 thinking 内容块
+// 将 thinking 内容以 <thinking>...</thinking> 标签包裹后输出
+func (h *StandardAssistantResponseEventHandler) handleThinkingContent(data map[string]any) ([]SSEEvent, error) {
+	content, _ := data["content"].(string)
+	if content == "" {
+		return []SSEEvent{}, nil
+	}
+
+	logger.Debug("处理 thinking 内容块",
+		logger.Int("content_length", len(content)))
+
+	// 输出为 Anthropic Extended Thinking 规范（thinking_delta），方便 Claude Code 识别“思考模式”。
+	// 注意：这里的 thinking 内容来自上游事件，本项目不生成/推断 thinking。
+	return []SSEEvent{
+		{
+			Event: "content_block_start",
+			Data: map[string]any{
+				"type":  "content_block_start",
+				"index": 0,
+				"content_block": map[string]any{
+					"type":     "thinking",
+					"thinking": "",
+				},
+			},
+		},
+		{
+			Event: "content_block_delta",
+			Data: map[string]any{
+				"type":  "content_block_delta",
+				"index": 0,
+				"delta": map[string]any{
+					"type":     "thinking_delta",
+					"thinking": content,
+				},
+			},
+		},
+		{
+			Event: "content_block_stop",
+			Data: map[string]any{
+				"type":  "content_block_stop",
+				"index": 0,
+			},
+		},
+	}, nil
 }
 
 // LegacyToolUseEventHandler 处理旧格式的工具使用事件
@@ -624,4 +688,64 @@ func (h *LegacyToolUseEventHandler) handleToolCallEvent(message *EventStreamMess
 
 	// 非stop事件的流式片段处理完成，返回空事件
 	return []SSEEvent{}, nil
+}
+
+// NoOpEventHandler 空操作事件处理器（用于静默忽略某些事件）
+type NoOpEventHandler struct{}
+
+func (h *NoOpEventHandler) Handle(message *EventStreamMessage) ([]SSEEvent, error) {
+	// 静默忽略事件，不产生任何输出
+	return []SSEEvent{}, nil
+}
+
+// ThinkingEventHandler 处理 Claude Extended Thinking 事件
+type ThinkingEventHandler struct{}
+
+func (h *ThinkingEventHandler) Handle(message *EventStreamMessage) ([]SSEEvent, error) {
+	var data map[string]any
+	if err := utils.FastUnmarshal(message.Payload, &data); err != nil {
+		logger.Warn("解析 thinking 事件失败", logger.Err(err))
+		return []SSEEvent{}, nil
+	}
+
+	content, _ := data["content"].(string)
+	if content == "" {
+		return []SSEEvent{}, nil
+	}
+
+	logger.Debug("处理 thinkingEvent",
+		logger.Int("content_length", len(content)))
+
+	// 输出为 Anthropic Extended Thinking 规范（thinking_delta），方便 Claude Code 识别。
+	return []SSEEvent{
+		{
+			Event: "content_block_start",
+			Data: map[string]any{
+				"type":  "content_block_start",
+				"index": 0,
+				"content_block": map[string]any{
+					"type":     "thinking",
+					"thinking": "",
+				},
+			},
+		},
+		{
+			Event: "content_block_delta",
+			Data: map[string]any{
+				"type":  "content_block_delta",
+				"index": 0,
+				"delta": map[string]any{
+					"type":     "thinking_delta",
+					"thinking": content,
+				},
+			},
+		},
+		{
+			Event: "content_block_stop",
+			Data: map[string]any{
+				"type":  "content_block_stop",
+				"index": 0,
+			},
+		},
+	}, nil
 }

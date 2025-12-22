@@ -13,6 +13,12 @@ type ToolChoice struct {
 	Name string `json:"name,omitempty"` // 当type为"tool"时指定的工具名称
 }
 
+// Thinking 表示 Claude 深度思考配置
+type Thinking struct {
+	Type         string `json:"type"`          // "enabled" 或 "disabled"
+	BudgetTokens int    `json:"budget_tokens"` // 思考预算 token 数
+}
+
 // AnthropicRequest 表示 Anthropic API 的请求结构
 type AnthropicRequest struct {
 	Model       string                    `json:"model"`
@@ -24,6 +30,7 @@ type AnthropicRequest struct {
 	Stream      bool                      `json:"stream"`
 	Temperature *float64                  `json:"temperature,omitempty"`
 	Metadata    map[string]any            `json:"metadata,omitempty"`
+	Thinking    *Thinking                 `json:"thinking,omitempty"` // Claude 深度思考配置
 }
 
 // AnthropicStreamResponse 表示 Anthropic 流式响应的结构
