@@ -275,7 +275,9 @@ func (s *AnthropicStreamSender) SendEvent(c *gin.Context, data any) error {
 
 	if dataMap, ok := data.(map[string]any); ok {
 		if t, exists := dataMap["type"]; exists {
-			eventType = t.(string)
+			if typeStr, ok := t.(string); ok {
+				eventType = typeStr
+			}
 		}
 
 	}

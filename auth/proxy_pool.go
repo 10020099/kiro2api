@@ -39,6 +39,10 @@ type ProxyPool struct {
 	// 状态
 	currentIndex int
 	enabled      bool
+	
+	// 优雅关闭
+	stopChan chan struct{}
+	stopped  bool
 }
 
 // ProxyPoolConfig 代理池配置
@@ -92,6 +96,7 @@ func NewProxyPool(cfg ProxyPoolConfig) *ProxyPool {
 		healthCheckInterval: cfg.HealthCheckInterval,
 		cooldownDuration:    cfg.CooldownDuration,
 		enabled:             len(cfg.Proxies) > 0,
+		stopChan:            make(chan struct{}),
 	}
 
 	// 初始化代理列表
@@ -246,8 +251,25 @@ func (pp *ProxyPool) backgroundHealthCheck() {
 	ticker := time.NewTicker(pp.healthCheckInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		pp.checkAllProxies()
+	for {
+		select {
+		case <-ticker.C:
+			pp.checkAllProxies()
+		case <-pp.stopChan:
+			logger.Info("代理池后台健康检查已停止")
+			return
+		}
+	}
+}
+
+// Stop 停止代理池后台任务
+func (pp *ProxyPool) Stop() {
+	pp.mutex.Lock()
+	defer pp.mutex.Unlock()
+	
+	if !pp.stopped {
+		pp.stopped = true
+		close(pp.stopChan)
 	}
 }
 
@@ -258,9 +280,24 @@ func (pp *ProxyPool) checkAllProxies() {
 	copy(proxiesToCheck, pp.proxies)
 	pp.mutex.RUnlock()
 
+	// 限制并发数，避免 goroutine 爆炸
+	const maxConcurrent = 5
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
+
 	for _, proxy := range proxiesToCheck {
-		go pp.checkProxyHealth(proxy)
+		wg.Add(1)
+		sem <- struct{}{} // 获取信号量
+		go func(p *ProxyInfo) {
+			defer func() {
+				<-sem // 释放信号量
+				wg.Done()
+			}()
+			pp.checkProxyHealth(p)
+		}(proxy)
 	}
+
+	wg.Wait()
 }
 
 // checkProxyHealth 检查单个代理健康状态

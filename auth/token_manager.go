@@ -74,10 +74,9 @@ func NewTokenManager(configs []AuthConfig) *TokenManager {
 }
 
 // getBestToken 获取最优可用token（带严格轮询和频率限制）
-// 统一锁管理：所有操作在单一锁保护下完成，避免多次加锁/解锁
+// 锁管理策略：手动管理，不混用 defer，避免 double unlock 风险
 func (tm *TokenManager) getBestToken() (types.TokenInfo, error) {
 	tm.mutex.Lock()
-	defer tm.mutex.Unlock()
 
 	// 检查是否需要刷新缓存（在锁内）
 	if time.Since(tm.lastRefresh) > config.TokenCacheTTL {
@@ -89,13 +88,17 @@ func (tm *TokenManager) getBestToken() (types.TokenInfo, error) {
 	// 选择下一个可用token（严格轮询）
 	bestToken, tokenKey := tm.selectNextAvailableTokenUnlocked()
 	if bestToken == nil {
+		tm.mutex.Unlock()
 		return types.TokenInfo{}, fmt.Errorf("没有可用的token")
 	}
+
+	// 复制 token 信息，释放锁后使用
+	tokenCopy := bestToken.Token
 
 	// 释放锁后执行频率限制等待（避免长时间持锁）
 	tm.mutex.Unlock()
 
-	// 频率限制等待
+	// 频率限制等待（不持锁，可能阻塞）
 	if tm.rateLimiter != nil {
 		tm.rateLimiter.WaitForToken(tokenKey)
 		tm.rateLimiter.RecordRequest(tokenKey)
@@ -115,17 +118,18 @@ func (tm *TokenManager) getBestToken() (types.TokenInfo, error) {
 
 	// 重新获取锁更新状态
 	tm.mutex.Lock()
-
-	// 更新最后使用时间（在锁内，安全）
+	// 更新最后使用时间
 	bestToken.LastUsed = time.Now()
 	if bestToken.Available > 0 {
 		bestToken.Available--
 	}
+	tm.mutex.Unlock()
 
-	return bestToken.Token, nil
+	return tokenCopy, nil
 }
 
 // GetTokenWithFingerprint 获取token及其对应的指纹
+// 锁管理策略：手动管理，不混用 defer，避免 double unlock 风险
 func (tm *TokenManager) GetTokenWithFingerprint() (types.TokenInfo, *Fingerprint, error) {
 	tm.mutex.Lock()
 
@@ -143,9 +147,12 @@ func (tm *TokenManager) GetTokenWithFingerprint() (types.TokenInfo, *Fingerprint
 		return types.TokenInfo{}, nil, fmt.Errorf("没有可用的token")
 	}
 
+	// 复制 token 信息，释放锁后使用
+	tokenCopy := bestToken.Token
+
 	tm.mutex.Unlock()
 
-	// 频率限制等待
+	// 频率限制等待（不持锁，可能阻塞）
 	if tm.rateLimiter != nil {
 		tm.rateLimiter.WaitForToken(tokenKey)
 		tm.rateLimiter.RecordRequest(tokenKey)
@@ -158,21 +165,21 @@ func (tm *TokenManager) GetTokenWithFingerprint() (types.TokenInfo, *Fingerprint
 		}
 	}
 
-	// 获取指纹
+	// 获取指纹（不需要持锁，FingerprintManager 内部有自己的锁）
 	var fingerprint *Fingerprint
 	if tm.fingerprintManager != nil {
 		fingerprint = tm.fingerprintManager.GetFingerprint(tokenKey)
 	}
 
+	// 重新获取锁更新状态
 	tm.mutex.Lock()
-	defer tm.mutex.Unlock()
-
 	bestToken.LastUsed = time.Now()
 	if bestToken.Available > 0 {
 		bestToken.Available--
 	}
+	tm.mutex.Unlock()
 
-	return bestToken.Token, fingerprint, nil
+	return tokenCopy, fingerprint, nil
 }
 
 // MarkTokenFailed 标记token请求失败，触发冷却

@@ -1,10 +1,14 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"kiro2api/auth"
 	"kiro2api/config"
@@ -245,9 +249,34 @@ func StartServer(port string, authToken string, authService *auth.AuthService) {
 
 	// 创建自定义HTTP服务器以支持长时间请求
 	server := &http.Server{
-		Addr:    ":" + port,
-		Handler: r,
+		Addr:         ":" + port,
+		Handler:      r,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 0, // 流式响应需要禁用写超时
+		IdleTimeout:  120 * time.Second,
 	}
+
+	// 优雅关闭：监听系统信号
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-quit
+		logger.Info("收到关闭信号，正在优雅关闭服务器...")
+
+		// 停止代理池后台任务
+		if proxyPool := auth.GetProxyPool(); proxyPool != nil {
+			proxyPool.Stop()
+		}
+
+		// 给予30秒时间完成现有请求
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := server.Shutdown(ctx); err != nil {
+			logger.Error("服务器关闭出错", logger.Err(err))
+		}
+	}()
 
 	logger.Info("启动HTTP服务器", logger.String("port", port))
 
@@ -255,6 +284,8 @@ func StartServer(port string, authToken string, authService *auth.AuthService) {
 		logger.Error("启动服务器失败", logger.Err(err), logger.String("port", port))
 		os.Exit(1)
 	}
+
+	logger.Info("服务器已关闭")
 }
 
 // corsMiddleware CORS中间件
