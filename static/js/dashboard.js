@@ -1,6 +1,6 @@
 /**
- * Token Dashboard - 前端控制器
- * 基于模块化设计，遵循单一职责原则
+ * Token Dashboard - Ghibli Style
+ * Clean, modular design with smooth interactions
  */
 
 class TokenDashboard {
@@ -8,41 +8,51 @@ class TokenDashboard {
         this.autoRefreshInterval = null;
         this.isAutoRefreshEnabled = false;
         this.apiBaseUrl = '/api';
+        this.refreshIntervalMs = 30000;
         
         this.init();
     }
 
-    /**
-     * 初始化Dashboard
-     */
     init() {
         this.bindEvents();
         this.refreshTokens();
     }
 
-    /**
-     * 绑定事件处理器 (DRY原则)
-     */
     bindEvents() {
-        // 手动刷新按钮
+        // Refresh button
         const refreshBtn = document.querySelector('.refresh-btn');
         if (refreshBtn) {
-            refreshBtn.addEventListener('click', () => this.refreshTokens());
+            refreshBtn.addEventListener('click', () => this.handleRefreshClick());
         }
 
-        // 自动刷新开关
+        // Auto-refresh switch
         const switchEl = document.querySelector('.switch');
         if (switchEl) {
             switchEl.addEventListener('click', () => this.toggleAutoRefresh());
+            // Keyboard accessibility
+            switchEl.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    this.toggleAutoRefresh();
+                }
+            });
         }
     }
 
-    /**
-     * 获取Token数据 - 简单直接 (KISS原则)
-     */
+    async handleRefreshClick() {
+        const btn = document.querySelector('.refresh-btn');
+        if (btn) {
+            btn.style.transform = 'scale(0.95)';
+            setTimeout(() => {
+                btn.style.transform = '';
+            }, 150);
+        }
+        await this.refreshTokens();
+    }
+
     async refreshTokens() {
         const tbody = document.getElementById('tokenTableBody');
-        this.showLoading(tbody, '正在刷新Token数据...');
+        this.showLoading(tbody);
         
         try {
             const response = await fetch(`${this.apiBaseUrl}/tokens`);
@@ -56,39 +66,48 @@ class TokenDashboard {
             this.updateLastUpdateTime();
             
         } catch (error) {
-            console.error('刷新Token数据失败:', error);
-            this.showError(tbody, `加载失败: ${error.message}`);
+            console.error('Failed to refresh token data:', error);
+            this.showError(tbody, `Failed to load: ${error.message}`);
         }
     }
 
-    /**
-     * 更新Token表格 (OCP原则 - 易于扩展新字段)
-     */
     updateTokenTable(data) {
         const tbody = document.getElementById('tokenTableBody');
         
         if (!data.tokens || data.tokens.length === 0) {
-            this.showError(tbody, '暂无Token数据');
+            this.showEmpty(tbody);
             return;
         }
         
-        const rows = data.tokens.map(token => this.createTokenRow(token)).join('');
+        const rows = data.tokens.map((token, index) => 
+            this.createTokenRow(token, index)
+        ).join('');
+        
         tbody.innerHTML = rows;
+        
+        // Animate rows
+        const rowElements = tbody.querySelectorAll('tr');
+        rowElements.forEach((row, i) => {
+            row.style.opacity = '0';
+            row.style.transform = 'translateY(10px)';
+            setTimeout(() => {
+                row.style.transition = 'all 0.3s ease';
+                row.style.opacity = '1';
+                row.style.transform = 'translateY(0)';
+            }, i * 50);
+        });
     }
 
-    /**
-     * 创建单个Token行 (SRP原则)
-     */
-    createTokenRow(token) {
+    createTokenRow(token, index) {
         const statusClass = this.getStatusClass(token);
         const statusText = this.getStatusText(token);
         
         return `
-            <tr>
-                <td>${token.user_email || 'unknown'}</td>
-                <td><span class="token-preview">${token.token_preview || 'N/A'}</span></td>
-                <td>${token.auth_type || 'social'}</td>
-                <td>${token.remaining_usage || 0}</td>
+            <tr data-index="${index}">
+                <td>${this.escapeHtml(token.user_email || 'unknown')}</td>
+                <td><span class="token-preview">${this.escapeHtml(token.token_preview || 'N/A')}</span></td>
+                <td>${this.escapeHtml(token.auth_type || 'social')}</td>
+                <td>${token.remaining_usage ?? 0}</td>
                 <td>${this.formatDateTime(token.expires_at)}</td>
                 <td>${this.formatDateTime(token.last_used)}</td>
                 <td><span class="status-badge ${statusClass}">${statusText}</span></td>
@@ -96,49 +115,67 @@ class TokenDashboard {
         `;
     }
 
-    /**
-     * 更新状态栏 (SRP原则)
-     */
     updateStatusBar(data) {
-        this.updateElement('totalTokens', data.total_tokens || 0);
-        this.updateElement('activeTokens', data.active_tokens || 0);
+        this.animateNumber('totalTokens', data.total_tokens || 0);
+        this.animateNumber('activeTokens', data.active_tokens || 0);
     }
 
-    /**
-     * 更新最后更新时间
-     */
+    animateNumber(elementId, targetValue) {
+        const element = document.getElementById(elementId);
+        if (!element) return;
+        
+        const currentValue = parseInt(element.textContent) || 0;
+        if (currentValue === targetValue) return;
+        
+        const duration = 300;
+        const steps = 15;
+        const increment = (targetValue - currentValue) / steps;
+        let step = 0;
+        
+        const timer = setInterval(() => {
+            step++;
+            if (step >= steps) {
+                element.textContent = targetValue;
+                clearInterval(timer);
+            } else {
+                element.textContent = Math.round(currentValue + increment * step);
+            }
+        }, duration / steps);
+    }
+
     updateLastUpdateTime() {
         const now = new Date();
-        const timeStr = now.toLocaleTimeString('zh-CN', { hour12: false });
+        const timeStr = now.toLocaleTimeString('en-US', { 
+            hour12: false,
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
         this.updateElement('lastUpdate', timeStr);
     }
 
-    /**
-     * 切换自动刷新 (ISP原则 - 接口隔离)
-     */
     toggleAutoRefresh() {
         const switchEl = document.querySelector('.switch');
         
         if (this.isAutoRefreshEnabled) {
             this.stopAutoRefresh();
             switchEl.classList.remove('active');
+            switchEl.setAttribute('aria-checked', 'false');
         } else {
             this.startAutoRefresh();
             switchEl.classList.add('active');
+            switchEl.setAttribute('aria-checked', 'true');
         }
     }
 
-    /**
-     * 启动自动刷新
-     */
     startAutoRefresh() {
-        this.autoRefreshInterval = setInterval(() => this.refreshTokens(), 30000);
+        this.autoRefreshInterval = setInterval(
+            () => this.refreshTokens(), 
+            this.refreshIntervalMs
+        );
         this.isAutoRefreshEnabled = true;
     }
 
-    /**
-     * 停止自动刷新
-     */
     stopAutoRefresh() {
         if (this.autoRefreshInterval) {
             clearInterval(this.autoRefreshInterval);
@@ -147,32 +184,29 @@ class TokenDashboard {
         this.isAutoRefreshEnabled = false;
     }
 
-    /**
-     * 工具方法 - 状态判断 (KISS原则)
-     */
     getStatusClass(token) {
-        if (new Date(token.expires_at) < new Date()) {
-            return 'status-expired';
-        }
-        const remaining = token.remaining_usage || 0;
+        if (this.isExpired(token)) return 'status-expired';
+        
+        const remaining = token.remaining_usage ?? 0;
         if (remaining === 0) return 'status-exhausted';
         if (remaining <= 5) return 'status-low';
         return 'status-active';
     }
 
     getStatusText(token) {
-        if (new Date(token.expires_at) < new Date()) {
-            return '已过期';
-        }
-        const remaining = token.remaining_usage || 0;
-        if (remaining === 0) return '已耗尽';
-        if (remaining <= 5) return '即将耗尽';
-        return '正常';
+        if (this.isExpired(token)) return 'Expired';
+        
+        const remaining = token.remaining_usage ?? 0;
+        if (remaining === 0) return 'Exhausted';
+        if (remaining <= 5) return 'Low';
+        return 'Active';
     }
 
-    /**
-     * 工具方法 - 日期格式化 (DRY原则)
-     */
+    isExpired(token) {
+        if (!token.expires_at) return false;
+        return new Date(token.expires_at) < new Date();
+    }
+
     formatDateTime(dateStr) {
         if (!dateStr) return '-';
         
@@ -180,7 +214,7 @@ class TokenDashboard {
             const date = new Date(dateStr);
             if (isNaN(date.getTime())) return '-';
             
-            return date.toLocaleString('zh-CN', {
+            return date.toLocaleString('en-US', {
                 year: 'numeric',
                 month: '2-digit',
                 day: '2-digit',
@@ -193,20 +227,23 @@ class TokenDashboard {
         }
     }
 
-    /**
-     * UI工具方法 (KISS原则)
-     */
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
     updateElement(id, content) {
         const element = document.getElementById(id);
         if (element) element.textContent = content;
     }
 
-    showLoading(container, message) {
+    showLoading(container) {
         container.innerHTML = `
             <tr>
                 <td colspan="7" class="loading">
                     <div class="spinner"></div>
-                    ${message}
+                    Loading token data...
                 </td>
             </tr>
         `;
@@ -215,15 +252,28 @@ class TokenDashboard {
     showError(container, message) {
         container.innerHTML = `
             <tr>
-                <td colspan="7" class="error">
-                    ${message}
+                <td colspan="7">
+                    <div class="error">${this.escapeHtml(message)}</div>
+                </td>
+            </tr>
+        `;
+    }
+
+    showEmpty(container) {
+        container.innerHTML = `
+            <tr>
+                <td colspan="7">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">~</div>
+                        <p>No token data available</p>
+                    </div>
                 </td>
             </tr>
         `;
     }
 }
 
-// DOM加载完成后初始化 (依赖注入原则)
+// Initialize on DOM ready
 document.addEventListener('DOMContentLoaded', () => {
-    new TokenDashboard();
+    window.dashboard = new TokenDashboard();
 });
